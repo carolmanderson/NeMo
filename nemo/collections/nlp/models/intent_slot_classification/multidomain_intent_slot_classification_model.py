@@ -22,14 +22,19 @@ from pytorch_lightning import Trainer
 from torch.utils.data import DataLoader
 
 from nemo.collections.common.losses import AggregatorLoss, CrossEntropyLoss
+from nemo.collections.nlp.data.intent_slot_classification import (
+    MultiDomainIntentSlotClassificationDataset,
+    MultiDomainIntentSlotDataDesc,
+    MultiDomainIntentSlotInferenceDataset,
+)
 from nemo.collections.nlp.data.domain_intent_slot_classification import (
     DomainIntentSlotClassificationDataset,
-    DomainIntentSlotDataDesc,
-    DomainIntentSlotInferenceDataset,
+    DomainIntentSlotInferenceDataset
 )
+
 from nemo.collections.nlp.metrics.classification_report import ClassificationReport
 from nemo.collections.nlp.models.nlp_model import NLPModel
-from nemo.collections.nlp.modules.common import DomainIntentTokenClassifier
+from nemo.collections.nlp.modules.common import MultiDomainSequenceTokenClassifier
 from nemo.collections.nlp.modules.common.lm_utils import get_lm_model
 from nemo.collections.nlp.parts.utils_funcs import tensor2list
 from nemo.core.classes import typecheck
@@ -38,7 +43,7 @@ from nemo.core.neural_types import NeuralType
 from nemo.utils import logging
 
 
-class DomainIntentSlotClassificationModel(NLPModel):
+class MultiDomainIntentSlotClassificationModel(NLPModel):
     """
     domain_cls_strategy options:
     shared: uses the CLS token for both intent and domain classification
@@ -62,20 +67,10 @@ class DomainIntentSlotClassificationModel(NLPModel):
         # Setup tokenizer.
         self.setup_tokenizer(cfg.tokenizer)
 
-        strategy = cfg.domain_cls_strategy
-        if strategy == "shared":
-            self.extra_cls_token = False
-        elif strategy in ["CLS2_random", "CLS2_from_CLS"]:
-            special_tokens = {'additional_special_tokens': ['[CLS2]']}
-            self.tokenizer.add_special_tokens(special_tokens_dict=special_tokens)
-            self.extra_cls_token = True
-        else:
-            raise Exception('domain_cls_strategy must be one of: "shared", "CLS2_random", "CLS2_from_CLS"')
-
         # Check the presence of data_dir.
         if not cfg.data_dir or not os.path.exists(cfg.data_dir):
             # Disable setup methods.
-            DomainIntentSlotClassificationModel._set_model_restore_state(is_being_restored=True)
+            MultiDomainIntentSlotClassificationModel._set_model_restore_state(is_being_restored=True)
             # Set default values of data_desc.
             self._set_defaults_data_desc(cfg)
         else:
@@ -87,7 +82,7 @@ class DomainIntentSlotClassificationModel(NLPModel):
         super().__init__(cfg=cfg, trainer=trainer)
 
         # Enable setup methods.
-        DomainIntentSlotClassificationModel._set_model_restore_state(is_being_restored=False)
+        MultiDomainIntentSlotClassificationModel._set_model_restore_state(is_being_restored=False)
 
         # Initialize Bert model
         self.bert_model = get_lm_model(
@@ -100,16 +95,6 @@ class DomainIntentSlotClassificationModel(NLPModel):
             vocab_file=cfg.tokenizer.vocab_file,
         )
 
-        if strategy in ["CLS2_random", "CLS2_from_CLS"]:
-            # resize bert model to account for extra [CLS2] token
-            self.bert_model.resize_token_embeddings(self.tokenizer.vocab_size)
-
-        if strategy == "CLS2_from_CLS":
-            # initialize the [CLS2] token embedding using the pretrained [CLS] embedding
-            input_embs = self.bert_model.get_input_embeddings()
-            with torch.no_grad():
-                input_embs.weight[-1] = input_embs.weight[self.tokenizer.cls_id]
-            self.bert_model.set_input_embeddings(input_embs)
 
         # Initialize Classifier.
         self._reconfigure_classifier()
@@ -139,22 +124,21 @@ class DomainIntentSlotClassificationModel(NLPModel):
             OmegaConf.set_struct(cfg, True)
 
     def _set_data_desc_to_cfg(self, cfg, data_dir, train_ds, validation_ds):
-        """ Method creates IntentSlotDataDesc and copies generated values to cfg.data_desc. """
+        """ Method creates MultiDomainIntentSlotDataDesc and copies generated values to cfg.data_desc. """
         # Save data from data desc to config - so it can be reused later, e.g. in inference.
-        data_desc = DomainIntentSlotDataDesc(data_dir=data_dir, modes=[train_ds.prefix, validation_ds.prefix])
+        data_desc = MultiDomainIntentSlotDataDesc(data_dir=data_dir, modes=[train_ds.prefix, validation_ds.prefix])
         OmegaConf.set_struct(cfg, False)
         if not hasattr(cfg, "data_desc") or cfg.data_desc is None:
             cfg.data_desc = {}
-        # Domains.
-        cfg.data_desc.domain_labels = list(data_desc.domains_label_ids.keys())
-        cfg.data_desc.domain_label_ids = data_desc.domains_label_ids
-        cfg.data_desc.domain_weights = data_desc.domain_weights
+        # # Domains.
+        cfg.data_desc.domain_labels = list(range(data_desc.num_domains))
+        # cfg.data_desc.domain_label_ids = data_desc.domains_label_ids
         # Intents.
-        cfg.data_desc.intent_labels = list(data_desc.intents_label_ids.keys())
+        cfg.data_desc.intent_labels = [list(domain.keys()) for domain in data_desc.intents_label_ids]
         cfg.data_desc.intent_label_ids = data_desc.intents_label_ids
         cfg.data_desc.intent_weights = data_desc.intent_weights
         # Slots.
-        cfg.data_desc.slot_labels = list(data_desc.slots_label_ids.keys())
+        cfg.data_desc.slot_labels = [list(domain.keys()) for domain in data_desc.slots_label_ids]
         cfg.data_desc.slot_label_ids = data_desc.slots_label_ids
         cfg.data_desc.slot_weights = data_desc.slot_weights
 
@@ -164,16 +148,20 @@ class DomainIntentSlotClassificationModel(NLPModel):
         if not hasattr(cfg, "class_labels") or cfg.class_labels is None:
             cfg.class_labels = {}
             cfg.class_labels = OmegaConf.create(
-                {'domain_labels_file': 'domain_labels.csv', 'intent_labels_file': 'intent_labels.csv', 'slot_labels_file': 'slot_labels.csv'}
+                {'domain_labels_file': 'domain_labels.csv', 'intent_labels_file': 'domain_{}_intent_labels.csv', 'slot_labels_file': 'domain_{}_slot_labels.csv'}
             )
 
-        slot_labels_file = os.path.join(data_dir, cfg.class_labels.slot_labels_file)
-        intent_labels_file = os.path.join(data_dir, cfg.class_labels.intent_labels_file)
+
         domain_labels_file = os.path.join(data_dir, cfg.class_labels.domain_labels_file)
-        self._save_label_ids(data_desc.slots_label_ids, slot_labels_file)
-        self._save_label_ids(data_desc.intents_label_ids, intent_labels_file)
         self._save_label_ids(data_desc.domains_label_ids, domain_labels_file)
 
+        for i in range(data_desc.num_domains):
+            slot_labels_file = os.path.join(data_dir, cfg.class_labels.slot_labels_file.format(i))
+            intent_labels_file = os.path.join(data_dir, cfg.class_labels.intent_labels_file.format(i))
+            self._save_label_ids(data_desc.slots_label_ids[i], slot_labels_file)
+            self._save_label_ids(data_desc.intents_label_ids[i], intent_labels_file)
+
+        # TODO: this is only registering the last set of files; fix this
         self.register_artifact(cfg.class_labels.domain_labels_file, domain_labels_file)
         self.register_artifact(cfg.class_labels.intent_labels_file, intent_labels_file)
         self.register_artifact(cfg.class_labels.slot_labels_file, slot_labels_file)
@@ -189,53 +177,59 @@ class DomainIntentSlotClassificationModel(NLPModel):
 
     def _reconfigure_classifier(self):
         """ Method reconfigures the classifier depending on the settings of model cfg.data_desc """
-
-        self.classifier = DomainIntentTokenClassifier(
+        self.num_domains = len(self.cfg.data_desc.domain_labels)
+        self.classifier = MultiDomainSequenceTokenClassifier(
             hidden_size=self.bert_model.config.hidden_size,
-            num_domains=len(self.cfg.data_desc.domain_labels),
-            num_intents=len(self.cfg.data_desc.intent_labels),
-            num_slots=len(self.cfg.data_desc.slot_labels),
+            num_domains=self.num_domains,
+            num_intents=[len(item) for item in self.cfg.data_desc.intent_labels],
+            num_slots=[len(item) for item in self.cfg.data_desc.slot_labels],
             dropout=self.cfg.head.fc_dropout,
             num_layers=self.cfg.head.num_output_layers,
             log_softmax=False,
-            extra_cls_token=self.extra_cls_token
         )
 
         # define losses
+        self.intent_losses = []
+        self.slot_losses = []
         if self.cfg.class_balancing == 'weighted_loss':
-            # You may need to increase the number of epochs for convergence when using weighted_loss
-            self.domain_loss = CrossEntropyLoss(logits_ndim=2, weight=self.cfg.data_desc.domain_weights)
-            self.intent_loss = CrossEntropyLoss(logits_ndim=2, weight=self.cfg.data_desc.intent_weights)
-            self.slot_loss = CrossEntropyLoss(logits_ndim=3, weight=self.cfg.data_desc.slot_weights)
+            for i in range(self.num_domains):
+                intent_loss = CrossEntropyLoss(logits_ndim=2, weight=self.cfg.data_desc.intent_weights[i])
+                self.intent_losses.append(intent_loss)
+                slot_loss = CrossEntropyLoss(logits_ndim=3, weight=self.cfg.data_desc.slot_weights[i])
+                self.slot_losses.append(slot_loss)
         else:
-            self.domain_loss = CrossEntropyLoss(logits_ndim=2)
-            self.intent_loss = CrossEntropyLoss(logits_ndim=2)
-            self.slot_loss = CrossEntropyLoss(logits_ndim=3)
+            for i in range(self.num_domains):
+                intent_loss = CrossEntropyLoss(logits_ndim=2)
+                self.intent_losses.append(intent_loss)
+                slot_loss = CrossEntropyLoss(logits_ndim=3)
+                self.slot_losses.append(slot_loss)
 
+        intent_loss_weight = self.cfg.intent_loss_weight
+        slot_loss_weight = 1.0 - self.cfg.intent_loss_weight
+        aggregator_weights = []
+        for i in range(self.num_domains):
+            aggregator_weights.append(intent_loss_weight)
+        for i in range(self.num_domains):
+            aggregator_weights.append(slot_loss_weight)
         self.total_loss = AggregatorLoss(
-            num_inputs=3, weights=[self.cfg.domain_loss_weight, self.cfg.intent_loss_weight,
-                                   1.0 - (self.cfg.domain_loss_weight + self.cfg.intent_loss_weight)]
-        )
+            num_inputs=2*self.num_domains, weights=aggregator_weights)
 
         # setup to track metrics
-        self.domain_classification_report = ClassificationReport(
-            num_classes=len(self.cfg.data_desc.domain_labels),
-            label_ids=self.cfg.data_desc.domain_label_ids,
-            dist_sync_on_step=True,
-            mode='micro',
-        )
-        self.intent_classification_report = ClassificationReport(
-            num_classes=len(self.cfg.data_desc.intent_labels),
-            label_ids=self.cfg.data_desc.intent_label_ids,
-            dist_sync_on_step=True,
-            mode='micro',
-        )
-        self.slot_classification_report = ClassificationReport(
-            num_classes=len(self.cfg.data_desc.slot_labels),
-            label_ids=self.cfg.data_desc.slot_label_ids,
-            dist_sync_on_step=True,
-            mode='micro',
-        )
+        self.intent_classification_reports = []
+        self.slot_classification_reports = []
+        for i in range(self.num_domains):
+            self.intent_classification_reports.append(ClassificationReport(
+                num_classes=len(self.cfg.data_desc.intent_labels[i]),
+                label_ids=self.cfg.data_desc.intent_label_ids[i],
+                dist_sync_on_step=True,
+                mode='micro',
+            ))
+            self.slot_classification_reports.append(ClassificationReport(
+                num_classes=len(self.cfg.data_desc.slot_labels[i]),
+                label_ids=self.cfg.data_desc.slot_label_ids[i],
+                dist_sync_on_step=True,
+                mode='micro',
+            ))
 
     def update_data_dir_for_training(self, data_dir: str, train_ds, validation_ds) -> None:
         """
@@ -271,8 +265,8 @@ class DomainIntentSlotClassificationModel(NLPModel):
         hidden_states = self.bert_model(
             input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask
         )
-        domain_logits, intent_logits, slot_logits = self.classifier(hidden_states=hidden_states)
-        return domain_logits, intent_logits, slot_logits
+        intent_logits, slot_logits = self.classifier(hidden_states=hidden_states)
+        return intent_logits, slot_logits
 
     def training_step(self, batch, batch_idx):
         """
@@ -281,15 +275,23 @@ class DomainIntentSlotClassificationModel(NLPModel):
         """
         # forward pass
         input_ids, input_type_ids, input_mask, loss_mask, subtokens_mask, domain_labels, intent_labels, slot_labels = batch
-        domain_logits, intent_logits, slot_logits = self(
+        intent_logits, slot_logits = self(
             input_ids=input_ids, token_type_ids=input_type_ids, attention_mask=input_mask
         )
 
         # calculate combined loss for intents and slots
-        domain_loss = self.domain_loss(logits=domain_logits, labels=domain_labels)
-        intent_loss = self.intent_loss(logits=intent_logits, labels=intent_labels)
-        slot_loss = self.slot_loss(logits=slot_logits, labels=slot_labels, loss_mask=loss_mask)
-        train_loss = self.total_loss(loss_1=domain_loss, loss_2=intent_loss, loss_3=slot_loss)
+        total_loss_input = {}
+        ctr = 1
+        for i in range(self.num_domains):
+            # select only the intent logits and intent labels relevant to this domain
+            intent_loss = self.intent_losses[i](logits=intent_logits[i], labels=intent_labels)
+            total_loss_input["loss_{}".format(ctr)] = intent_loss
+            ctr += 1
+        for i in range(self.num_domains):
+            slot_loss = self.slot_losses[i](logits=slot_logits[i], labels=slot_labels, loss_mask=loss_mask)
+            total_loss_input["loss_{}".format(ctr)] = slot_loss
+            ctr += 1
+        train_loss = self.total_loss(**total_loss_input)
         lr = self._optimizer.param_groups[0]['lr']
 
         self.log('train_loss', train_loss)
@@ -306,41 +308,44 @@ class DomainIntentSlotClassificationModel(NLPModel):
         passed in as `batch`.
         """
         input_ids, input_type_ids, input_mask, loss_mask, subtokens_mask, domain_labels, intent_labels, slot_labels = batch
-        domain_logits, intent_logits, slot_logits = self(
+        intent_logits, slot_logits = self(
             input_ids=input_ids, token_type_ids=input_type_ids, attention_mask=input_mask
         )
 
         # calculate combined loss for intents and slots
-        domain_loss = self.domain_loss(logits=domain_logits, labels=domain_labels)
-        intent_loss = self.intent_loss(logits=intent_logits, labels=intent_labels)
-        slot_loss = self.slot_loss(logits=slot_logits, labels=slot_labels, loss_mask=loss_mask)
-        val_loss = self.total_loss(loss_1=domain_loss, loss_2=intent_loss, loss_3=slot_loss)
+        total_loss_input = {}
+        ctr = 1
+        for i in range(self.num_domains):
+            intent_loss = self.intent_losses[i](logits=intent_logits[i], labels=intent_labels)
+            total_loss_input["loss_" + str(ctr)] = intent_loss
+            ctr += 1
+        for i in range(self.num_domains):
+            slot_loss = self.slot_losses[i](logits=slot_logits[i], labels=slot_labels, loss_mask=loss_mask)   #TODO: change masking
+            total_loss_input["loss_" + str(ctr)] = slot_loss
+            ctr += 1
+        val_loss = self.total_loss(**total_loss_input)
 
         # calculate accuracy metrics for intents and slot reporting
-        # domains
-        preds = torch.argmax(domain_logits, axis=-1)
-        self.domain_classification_report.update(preds, domain_labels)
         # intents
-        preds = torch.argmax(intent_logits, axis=-1)
-        self.intent_classification_report.update(preds, intent_labels)
+        for i in range(self.num_domains):
+            preds = torch.argmax(intent_logits[i], axis=-1)
+            self.intent_classification_reports[i].update(preds, intent_labels)
         # slots
         subtokens_mask = subtokens_mask > 0.5
-        preds = torch.argmax(slot_logits, axis=-1)[subtokens_mask]
-        slot_labels = slot_labels[subtokens_mask]
-        self.slot_classification_report.update(preds, slot_labels)
+        for i in range(self.num_domains):
+            preds = torch.argmax(slot_logits[i], axis=-1)[subtokens_mask]
+            masked_slot_labels = slot_labels[subtokens_mask]
+            self.slot_classification_reports[i].update(preds, masked_slot_labels)
 
         return {
             'val_loss': val_loss,
-            'domain_tp': self.domain_classification_report.tp,
-            'domain_fn': self.domain_classification_report.fn,
-            'domain_fp': self.domain_classification_report.fp,
-            'intent_tp': self.intent_classification_report.tp,
-            'intent_fn': self.intent_classification_report.fn,
-            'intent_fp': self.intent_classification_report.fp,
-            'slot_tp': self.slot_classification_report.tp,
-            'slot_fn': self.slot_classification_report.fn,
-            'slot_fp': self.slot_classification_report.fp,
-        }
+            'intent_tp': self.intent_classification_reports[0].tp,
+            'intent_fn': self.intent_classification_reports[0].fn,
+            'intent_fp': self.intent_classification_reports[0].fp,
+            'slot_tp': self.slot_classification_reports[0].tp,
+            'slot_fn': self.slot_classification_reports[0].fn,
+            'slot_fp': self.slot_classification_reports[0].fp,
+        }   # TODO: include all classification reports here
 
     def validation_epoch_end(self, outputs):
         """
@@ -348,33 +353,25 @@ class DomainIntentSlotClassificationModel(NLPModel):
         :param outputs: list of individual outputs of each validation step.
         """
         avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
+        self.log('val_loss', avg_loss)
 
         # calculate metrics and log classification report (separately for intents and slots)
-        domain_precision, domain_recall, domain_f1, domain_report = self.domain_classification_report.compute()
-        logging.info(f'Domain report: {domain_report}')
+        for i in range(self.num_domains):
+            intent_precision, intent_recall, intent_f1, intent_report = self.intent_classification_reports[i].compute()
+            logging.info(f'Intent report {i}: {intent_report}')
 
-        intent_precision, intent_recall, intent_f1, intent_report = self.intent_classification_report.compute()
-        logging.info(f'Intent report: {intent_report}')
+            slot_precision, slot_recall, slot_f1, slot_report = self.slot_classification_reports[i].compute()
+            logging.info(f'Slot report {i}: {slot_report}')
 
-        slot_precision, slot_recall, slot_f1, slot_report = self.slot_classification_report.compute()
-        logging.info(f'Slot report: {slot_report}')
-
-        self.log('val_loss', avg_loss)
-        self.log('domain_precision', domain_precision)
-        self.log('domain_recall', domain_recall)
-        self.log('domain_f1', domain_f1)
-        self.log('intent_precision', intent_precision)
-        self.log('intent_recall', intent_recall)
-        self.log('intent_f1', intent_f1)
-        self.log('slot_precision', slot_precision)
-        self.log('slot_recall', slot_recall)
-        self.log('slot_f1', slot_f1)
+            self.log('intent_precision, domain {i}', intent_precision)
+            self.log('intent_recall, domain {i}', intent_recall)
+            self.log('intent_f1, domain {i}', intent_f1)
+            self.log('slot_precision, domain {i}', slot_precision)
+            self.log('slot_recall, domain {i}', slot_recall)
+            self.log('slot_f1, domain {i}', slot_f1)
 
         return {
             'val_loss': avg_loss,
-            'domain_precision': domain_precision,
-            'domain_recall': domain_recall,
-            'domain_f1': domain_f1,
             'intent_precision': intent_precision,
             'intent_recall': intent_recall,
             'intent_f1': intent_f1,
@@ -425,7 +422,6 @@ class DomainIntentSlotClassificationModel(NLPModel):
             pad_label=self.cfg.data_desc.pad_label,
             ignore_extra_tokens=self.cfg.ignore_extra_tokens,
             ignore_start_end=self.cfg.ignore_start_end,
-            extra_cls_token=self.extra_cls_token
         )
 
         return DataLoader(
@@ -565,28 +561,27 @@ if __name__ == "__main__":
 
     from omegaconf import OmegaConf
 
-    HOME_DIR = "/home/carola/Documents"
-    os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
-    os.environ["WANDB_API_KEY"] = "120defe2c9f49b0a586d0faaf50a9c80b54665ec"
+    HOME_DIR = "/Users/carola/Documents"
 
     # directory with data converted to nemo format
-    data_dir = os.path.join(HOME_DIR, "data/domain_merging/combined_domains/merged_with_domain")
+    # we have one directory for each domain
+    data_dir = os.path.join(HOME_DIR, "data/domain_merging/combined_domains_for_multihead_model")
+    # data_dir = os.path.join(HOME_DIR, "data/domain_merging/combined_domains/merged_with_domain")
 
     # config
     config_file = os.path.join(HOME_DIR,
-                               "configs/joint_domain_intent_slot/domain_intent_slot_classification_config.yaml")
+                               "configs/multidomain_intent_slot/multidomain_intent_slot_classification_config.yaml")
     config = OmegaConf.load(config_file)
     config.trainer.max_epochs = 100
-    config.model.data_dir = data_dir
     config.model.validation_ds.prefix = "dev"
     config.model.test_ds.prefix = "dev"
     config.model.intent_loss_weight = 0.5
     config.model.domain_loss_weight = 0.05
     config.model.class_balancing = "weighted_loss"
-    config.model.domain_cls_strategy = "CLS2_random"  # options: shared, CLS2_random, CLS2_from_CLS
     config.trainer.val_check_interval = 100
-    config.exp_manager.create_wandb_logger=True
-    config.exp_manager.wandb_logger_kwargs = {"name": "test", "project": "nvcc", "entity":"carola"}
+    config.model.data_dir = data_dir
+    # config.exp_manager.create_wandb_logger=True
+    # config.exp_manager.wandb_logger_kwargs = {"name": "test", "project": "nvcc", "entity":"carola"}
 
     # checks if we have GPU available and uses it
     cuda = 1 if torch.cuda.is_available() else 0
@@ -607,5 +602,5 @@ if __name__ == "__main__":
     config.exp_manager.exp_dir = os.path.join(HOME_DIR, "output/")
 
     exp_dir = exp_manager(trainer, config.get("exp_manager", None))
-    model = nemo_nlp.models.DomainIntentSlotClassificationModel(config.model, trainer=trainer)
+    model = nemo_nlp.models.MultiDomainIntentSlotClassificationModel(config.model, trainer=trainer)
     trainer.fit(model)

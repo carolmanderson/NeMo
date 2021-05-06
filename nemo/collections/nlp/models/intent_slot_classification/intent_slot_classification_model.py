@@ -269,9 +269,14 @@ class IntentSlotClassificationModel(NLPModel):
         preds = torch.argmax(intent_logits, axis=-1)
         self.intent_classification_report.update(preds, intent_labels)
         # slots
+        print("slot logits shape: ", slot_logits.shape)
+        print("subtokens mask shape: ", subtokens_mask.shape)
         subtokens_mask = subtokens_mask > 0.5
         preds = torch.argmax(slot_logits, axis=-1)[subtokens_mask]
+        print("preds shape before subtokens mask: ", preds.shape)
         slot_labels = slot_labels[subtokens_mask]
+        print("preds shape after subtokens mask: ", preds.shape)
+        print("slot labels shape: ", slot_labels.shape)
         self.slot_classification_report.update(preds, slot_labels)
 
         return {
@@ -482,3 +487,60 @@ class IntentSlotClassificationModel(NLPModel):
         )
         result.append(model)
         return result
+
+
+
+if __name__ == "__main__":
+    from nemo.collections import nlp as nemo_nlp
+    from nemo.utils.exp_manager import exp_manager
+    from nemo.utils import logging
+
+    import os
+    import torch
+    import pytorch_lightning as pl
+    from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+
+    from omegaconf import OmegaConf
+
+    HOME_DIR = "/Users/carola/Documents"
+    # directory with data converted to nemo format
+    # we have one directory for each domain
+    # data_dir = os.path.join(HOME_DIR, "data/domain_merging/combined_domains_for_multihead_model")
+    data_dir = os.path.join(HOME_DIR, "data/domain_merging/rc3_weather/weather")
+
+    # config
+    config_file = os.path.join(HOME_DIR,
+                               "configs/joint_intent_slot/intent_slot_classification_config.yaml")
+    config = OmegaConf.load(config_file)
+    config.trainer.max_epochs = 100
+    config.model.validation_ds.prefix = "dev"
+    config.model.test_ds.prefix = "dev"
+    config.model.intent_loss_weight = 0.5
+    config.model.domain_loss_weight = 0.05
+    config.model.class_balancing = "weighted_loss"
+    config.trainer.val_check_interval = 100
+    config.model.data_dir = data_dir
+    # config.exp_manager.create_wandb_logger=True
+    # config.exp_manager.wandb_logger_kwargs = {"name": "test", "project": "nvcc", "entity":"carola"}
+
+    # checks if we have GPU available and uses it
+    cuda = 1 if torch.cuda.is_available() else 0
+    config.trainer.gpus = cuda
+
+    config.trainer.precision = 16 if torch.cuda.is_available() else 32
+
+    # for mixed precision training, uncomment the line below (precision should be set to 16 and amp_level to O1):
+    # config.trainer.amp_level = O1
+
+    # remove distributed training flags
+    config.trainer.accelerator = None
+
+    early_stop_callback = EarlyStopping(monitor='intent_f1', min_delta=1e-1, patience=10, verbose=True, mode='max')
+
+    trainer = pl.Trainer(callbacks=[early_stop_callback], **config.trainer)
+
+    config.exp_manager.exp_dir = os.path.join(HOME_DIR, "output/")
+
+    exp_dir = exp_manager(trainer, config.get("exp_manager", None))
+    model = nemo_nlp.models.IntentSlotClassificationModel(config.model, trainer=trainer)
+    trainer.fit(model)

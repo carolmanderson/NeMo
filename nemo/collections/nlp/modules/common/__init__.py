@@ -31,5 +31,6 @@ from nemo.collections.nlp.modules.common.sequence_classifier import SequenceClas
 from nemo.collections.nlp.modules.common.sequence_regression import SequenceRegression
 from nemo.collections.nlp.modules.common.sequence_token_classifier import SequenceTokenClassifier
 from nemo.collections.nlp.modules.common.domain_intent_token_classifier import DomainIntentTokenClassifier
+from nemo.collections.nlp.modules.common.multidomain_sequence_token_classifier import MultiDomainSequenceTokenClassifier
 from nemo.collections.nlp.modules.common.token_classifier import BertPretrainingTokenClassifier, TokenClassifier
 from nemo.collections.nlp.modules.common.tokenizer_utils import get_tokenizer, get_tokenizer_list

@@ -15,3 +15,6 @@
 from nemo.collections.nlp.models.intent_slot_classification.intent_slot_classification_model import (
     IntentSlotClassificationModel,
 )
+from nemo.collections.nlp.models.intent_slot_classification.multidomain_intent_slot_classification_model import (
+    MultiDomainIntentSlotClassificationModel
+)

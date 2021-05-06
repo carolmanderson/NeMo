@@ -20,3 +20,11 @@ from nemo.collections.nlp.data.intent_slot_classification.intent_slot_classifica
 from nemo.collections.nlp.data.intent_slot_classification.intent_slot_classification_descriptor import (
     IntentSlotDataDesc,
 )
+from nemo.collections.nlp.data.intent_slot_classification.multidomain_intent_slot_classification_dataset import (
+    MultiDomainIntentSlotClassificationDataset,
+    MultiDomainIntentSlotInferenceDataset,
+)
+
+from nemo.collections.nlp.data.intent_slot_classification.multidomain_intent_slot_classification_descriptor import (
+    MultiDomainIntentSlotDataDesc,
+)
