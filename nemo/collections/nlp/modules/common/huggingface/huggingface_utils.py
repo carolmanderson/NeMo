@@ -21,17 +21,21 @@ from transformers import (
     BERT_PRETRAINED_MODEL_ARCHIVE_LIST,
     DISTILBERT_PRETRAINED_MODEL_ARCHIVE_LIST,
     ROBERTA_PRETRAINED_MODEL_ARCHIVE_LIST,
+    IBERT_PRETRAINED_MODEL_ARCHIVE_LIST,
     AlbertConfig,
     AutoModel,
     BertConfig,
     DistilBertConfig,
     RobertaConfig,
+    IBertConfig
 )
 
 from nemo.collections.nlp.modules.common.huggingface.albert import AlbertEncoder
 from nemo.collections.nlp.modules.common.huggingface.bert import BertEncoder
 from nemo.collections.nlp.modules.common.huggingface.distilbert import DistilBertEncoder
 from nemo.collections.nlp.modules.common.huggingface.roberta import RobertaEncoder
+from nemo.collections.nlp.modules.common.huggingface.ibert import IBertEncoder
+
 from nemo.utils import logging
 
 __all__ = ["get_huggingface_lm_model", "get_huggingface_pretrained_lm_models_list"]
@@ -61,6 +65,12 @@ HUGGINGFACE_MODELS = {
         "class": AlbertEncoder,
         "config": AlbertConfig,
         "pretrained_model_list": ALBERT_PRETRAINED_MODEL_ARCHIVE_LIST,
+    },
+    "IBertModel": {
+        "default": "kssteven/ibert-roberta-base",
+        "class": IBertEncoder,
+        "config": IBertConfig,
+        "pretrained_model_list": IBERT_PRETRAINED_MODEL_ARCHIVE_LIST,
     },
 }
 

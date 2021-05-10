@@ -462,16 +462,16 @@ class DomainIntentSlotClassificationModel(NLPModel):
             drop_last=test_ds.drop_last,
         )
 
-    def predict_from_examples(self, queries: List[str], test_ds) -> List[List[str]]:
-        # TODO: update this to add domain predictions
+    def predict_from_examples(self, queries: List[str], batch_size: int = 32) -> List[List[str]]:
         """
         Get prediction for the queries (intent and slots)
         Args:
             queries: text sequences
             test_ds: Dataset configuration section.
         Returns:
-            predicted_intents, predicted_slots: model intent and slot predictions
+            predicted_domains, predicted_intents, predicted_slots: model intent and slot predictions
         """
+        predicted_domains = []
         predicted_intents = []
         predicted_slots = []
         mode = self.training
@@ -494,7 +494,7 @@ class DomainIntentSlotClassificationModel(NLPModel):
             self.to(device)
 
             # Dataset.
-            infer_datalayer = self._setup_infer_dataloader(queries, test_ds)
+            infer_datalayer = self._setup_infer_dataloader(queries, batch_size)
 
             for batch in infer_datalayer:
                 input_ids, input_type_ids, input_mask, loss_mask, subtokens_mask = batch
@@ -505,6 +505,15 @@ class DomainIntentSlotClassificationModel(NLPModel):
                     attention_mask=input_mask.to(device),
                 )
                 # predict intents and slots for these examples
+                # domains
+                domain_preds = tensor2list(torch.argmax(domain_logits, axis=-1))
+                for domain_num in domain_preds:
+                    if domain_num < len(domain_labels):
+                        predicted_domains.append(domain_labels[int(domain_num)])
+                    else:
+                        # should not happen
+                        predicted_domains.append("Unknown Domain")
+
                 # intents
                 intent_preds = tensor2list(torch.argmax(intent_logits, axis=-1))
 
@@ -533,79 +542,83 @@ class DomainIntentSlotClassificationModel(NLPModel):
             # set mode back to its original value
             self.train(mode=mode)
 
-        return predicted_intents, predicted_slots
+        return predicted_domains, predicted_intents, predicted_slots
+
 
     @classmethod
     def list_available_models(cls) -> Optional[PretrainedModelInfo]:
         """
-        This method returns a list of pre-trained model which can be instantiated directly from NVIDIA's NGC cloud.
+        This method must be implemented, but there are no available pretrained models, so it returns None.
 
         Returns:
             List of available pre-trained models.
         """
-        result = []
-        model = PretrainedModelInfo(
-            pretrained_model_name="Joint_Intent_Slot_Assistant",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemonlpmodels/versions/1.0.0a5/files/Joint_Intent_Slot_Assistant.nemo",
-            description="This models is trained on this https://github.com/xliuhw/NLU-Evaluation-Data dataset which includes 64 various intents and 55 slots. Final Intent accuracy is about 87%, Slot accuracy is about 89%.",
-        )
-        result.append(model)
-        return result
+
+        return None
 
 
 if __name__ == "__main__":
+    import os
+    import time
+
     from nemo.collections import nlp as nemo_nlp
     from nemo.utils.exp_manager import exp_manager
     from nemo.utils import logging
 
-    import os
     import torch
+    from omegaconf import OmegaConf
     import pytorch_lightning as pl
     from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+    import wandb
 
-    from omegaconf import OmegaConf
 
-    HOME_DIR = "/Users/carola/Documents"
-    os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
-    os.environ["WANDB_API_KEY"] = ""
 
-    # directory with data converted to nemo format
-    data_dir = os.path.join(HOME_DIR, "data/domain_merging/combined_domains/merged_with_domain")
+    for cls_strategy in ["CLS2_from_CLS", 'CLS2_random']:
 
-    # config
-    config_file = os.path.join(HOME_DIR,
-                               "configs/joint_domain_intent_slot/domain_intent_slot_classification_config.yaml")
-    config = OmegaConf.load(config_file)
-    config.trainer.max_epochs = 100
-    config.model.data_dir = data_dir
-    config.model.validation_ds.prefix = "dev"
-    config.model.test_ds.prefix = "dev"
-    config.model.intent_loss_weight = 0.5
-    config.model.domain_loss_weight = 0.05
-    config.model.class_balancing = "weighted_loss"
-    config.model.domain_cls_strategy = "CLS2_random"  # options: shared, CLS2_random, CLS2_from_CLS
-    config.trainer.val_check_interval = 100
-    # config.exp_manager.create_wandb_logger=True
-    # config.exp_manager.wandb_logger_kwargs = {"name": "test", "project": "nvcc", "entity":"carola"}
+        HOME_DIR = "/home/carola/Documents"
 
-    # checks if we have GPU available and uses it
-    cuda = 1 if torch.cuda.is_available() else 0
-    config.trainer.gpus = cuda
+        # directory with data converted to nemo format
+        data_dir = os.path.join(HOME_DIR, "data/domain_merging/combined_domains/merged_with_domain")
 
-    config.trainer.precision = 16 if torch.cuda.is_available() else 32
+        # config
+        config_file = os.path.join(HOME_DIR,
+                                   "configs/joint_domain_intent_slot/domain_intent_slot_classification_new_hyperparams.yaml")
+        config = OmegaConf.load(config_file)
+        config.trainer.max_epochs = 40
+        config.model.data_dir = data_dir
+        config.model.validation_ds.prefix = "dev"
+        config.model.test_ds.prefix = "dev"
+        config.model.intent_loss_weight = 0.5
+        config.model.domain_loss_weight = 0.05
+        config.model.class_balancing = "weighted_loss"
+        config.model.domain_cls_strategy = cls_strategy  # options: shared, CLS2_random, CLS2_from_CLS
+        config.trainer.val_check_interval = 100
+        config.exp_manager.create_wandb_logger=True
+        config.exp_manager.wandb_logger_kwargs = {"name": "domain_intent_slot_20210506_{}".format(cls_strategy), "project": "nvcc", "entity":"carola"}
+        config.exp_manager.version = time.strftime('%Y-%m-%d_%H-%M-%S')
 
-    # for mixed precision training, uncomment the line below (precision should be set to 16 and amp_level to O1):
-    # config.trainer.amp_level = O1
+        # checks if we have GPU available and uses it
+        cuda = 1 if torch.cuda.is_available() else 0
+        config.trainer.gpus = cuda
 
-    # remove distributed training flags
-    config.trainer.accelerator = None
+        config.trainer.precision = 16 if torch.cuda.is_available() else 32
 
-    early_stop_callback = EarlyStopping(monitor='intent_f1', min_delta=1e-1, patience=10, verbose=True, mode='max')
+        # for mixed precision training, uncomment the line below (precision should be set to 16 and amp_level to O1):
+        # config.trainer.amp_level = O1
 
-    trainer = pl.Trainer(callbacks=[early_stop_callback], **config.trainer)
+        # remove distributed training flags
+        config.trainer.accelerator = None
 
-    config.exp_manager.exp_dir = os.path.join(HOME_DIR, "output/")
+        # early_stop_callback = EarlyStopping(monitor='intent_f1', min_delta=1e-1, patience=10, verbose=True, mode='max')
 
-    exp_dir = exp_manager(trainer, config.get("exp_manager", None))
-    model = nemo_nlp.models.DomainIntentSlotClassificationModel(config.model, trainer=trainer)
-    trainer.fit(model)
+        # trainer = pl.Trainer(callbacks=[early_stop_callback], **config.trainer)
+        trainer = pl.Trainer(**config.trainer)
+
+
+        config.exp_manager.exp_dir = os.path.join(HOME_DIR, "output/")
+
+        exp_dir = exp_manager(trainer, config.get("exp_manager", None))
+        model = nemo_nlp.models.DomainIntentSlotClassificationModel(config.model, trainer=trainer)
+        trainer.fit(model)
+
+        wandb.finish()

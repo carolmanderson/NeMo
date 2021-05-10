@@ -20,6 +20,7 @@ from nemo.collections.nlp.modules.common import (
     DistilBertEncoder,
     MegatronBertEncoder,
     RobertaEncoder,
+    IBertEncoder,
     SequenceClassifier,
     SequenceRegression,
     SequenceTokenClassifier,

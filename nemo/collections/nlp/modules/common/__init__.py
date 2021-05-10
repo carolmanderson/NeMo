@@ -20,6 +20,7 @@ from nemo.collections.nlp.modules.common.huggingface import (
     BertEncoder,
     DistilBertEncoder,
     RobertaEncoder,
+    IBertEncoder
 )
 from nemo.collections.nlp.modules.common.lm_utils import (
     get_lm_model,

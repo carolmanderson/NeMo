@@ -482,3 +482,110 @@ class IntentSlotClassificationModel(NLPModel):
         )
         result.append(model)
         return result
+
+
+
+
+
+if __name__ == "__main__":
+    from typing import Dict, List, Optional
+
+    from nemo.collections import nlp as nemo_nlp
+    from nemo.utils.exp_manager import exp_manager
+    from nemo.utils import logging
+    from nemo.collections.nlp.parts.utils_funcs import tensor2list
+
+    import os
+    import time
+
+    import pandas as pd
+    import wget
+    from sklearn.metrics import classification_report
+    import torch
+    import pytorch_lightning as pl
+    from pytorch_lightning.loggers import WandbLogger
+    from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+    import torch.nn as nn
+    import wandb
+
+    from omegaconf import OmegaConf
+
+
+
+    # # os.environ["WANDB_BASE_URL"] = "http://api.wandb.ai"
+    # # os.environ["WANDB_API_KEY"] = "120defe2c9f49b0a586d0faaf50a9c80b54665ec"
+    #
+    DOCKER = False
+
+    if DOCKER:
+        HOME_DIR = "/workspace"
+    else:
+        HOME_DIR = "/Users/carola/Documents"
+
+    models = {}  # save paths to best models
+
+    # directory with data converted to nemo format
+    data_dir = os.path.join(HOME_DIR, "data/domain_merging")
+
+    datasets = {"merged_no_prepend": "combined_domains/merged","merged_prepend": "combined_domains/merged_prepended"}
+    # datasets = {"merged_prepend": "combined_domains/merged_prepended"}
+    # datasets = {"weather_no_prepend" : "rc3_weather/weather"}
+    # datasets = {"poi_no_prepend" : "rc2.2_poi/poi"}
+    # datasets = {"smalltalk_no_prepend" : "rc2.2_smalltalk/smalltalk"}
+    #
+
+    for i, dataset in enumerate(datasets.keys()):
+        print(dataset)
+        inpath = os.path.join(data_dir, datasets[dataset])
+
+        # config
+        config_file = os.path.join(HOME_DIR,
+                                   "configs/joint_intent_slot/intent_slot_classification_config.yaml")
+        config = OmegaConf.load(config_file)
+        config.model.data_dir = inpath
+        config.model.language_model.pretrained_model_name = "kssteven/ibert-roberta-base"
+        config.model.validation_ds.prefix = "dev"
+        config.model.test_ds.prefix = "dev"
+        config.model.intent_loss_weight = 0.6
+        config.model.class_balancing = "weighted_loss"
+        config.model.head.num_output_layers = 1
+        config.exp_manager.create_wandb_logger = True
+        run_name = "run {}".format(i+20)
+        config.exp_manager.wandb_logger_kwargs = {
+            "name": run_name,
+            "project": "tinkering", "entity": "carola", "reinit": True}
+        config.trainer.max_epochs = 2
+
+        # checks if we have GPU available and uses it
+        cuda = 1 if torch.cuda.is_available() else 0
+        config.trainer.gpus = cuda
+
+        config.trainer.precision = 16 if torch.cuda.is_available() else 32
+
+        # for mixed precision training, uncomment the line below (precision should be set to 16 and amp_level to O1):
+        # config.trainer.amp_level = O1
+
+        # remove distributed training flags
+        config.trainer.accelerator = None
+
+        #     early_stop_callback = EarlyStopping(monitor='intent_f1', min_delta=1e-1, patience=10, verbose=True, mode='max')
+
+        # trainer = pl.Trainer(callbacks=[early_stop_callback], **config.trainer)
+        trainer = pl.Trainer(**config.trainer)
+        config.exp_manager.exp_dir = os.path.join(HOME_DIR, "output/" + dataset)
+        config.exp_manager.create_checkpoint_callback = True
+        config.exp_manager.version = time.strftime('%Y-%m-%d_%H-%M-%S')
+
+        exp_dir = exp_manager(trainer, config.get("exp_manager", None))
+        # the exp_dir provides  a path to the current experiment for easy access
+        print(str(exp_dir))
+        print("Wandb: ", config.exp_manager.wandb_logger_kwargs)
+
+        #     initialize the model
+        model = nemo_nlp.models.IntentSlotClassificationModel(config.model, trainer=trainer)
+
+        # train
+        trainer.fit(model)
+        models[dataset] = trainer.checkpoint_callback.best_model_path
+
+        wandb.finish()

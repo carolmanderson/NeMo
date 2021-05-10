@@ -96,6 +96,7 @@ class AutoTokenizer(TokenizerSpec):
             unk_token: token to use for unknown tokens
             use_fast: whether to use fast HuggingFace tokenizer
         """
+        print("model name: ", repr(pretrained_model_name))
         try:
             if vocab_file is not None:
                 message = 'Using "slow" HuggingFace tokenizer'
