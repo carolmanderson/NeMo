@@ -150,11 +150,18 @@ pipeline {
       }
       failFast true
       parallel {
-        stage('L2: pynini export') {
+        stage('L2: TN') {
           steps {
-            sh 'cd tools/inverse_text_normalization_deployment && python pynini_export.py /home/TestData/nlp/text_denorm/output/ && ls -R /home/TestData/nlp/text_denorm/output/ && echo ".far files created "|| exit 1'
-            sh 'cd tools/inverse_text_normalization_deployment && cp *.grm /home/TestData/nlp/text_denorm/output/'
-            sh 'ls -R /home/TestData/nlp/text_denorm/output/'
+            sh 'cd tools/text_processing_deployment && python pynini_export.py --output=/home/TestData/nlp/text_norm/output/ --grammars=tn_grammars && ls -R /home/TestData/nlp/text_norm/output/ && echo ".far files created "|| exit 1'
+            sh 'cd nemo_text_processing/text_normalization/ &&  python run_predict.py --input=/home/TestData/nlp/text_norm/ci/test.txt --input_case="lower_cased" --output=/home/TestData/nlp/text_norm/output/test.pynini.txt --verbose'
+            sh 'cmp --silent /home/TestData/nlp/text_norm/output/test.pynini.txt /home/TestData/nlp/text_norm/ci/test_goal_py.txt || exit 1'
+            sh 'rm -rf /home/TestData/nlp/text_norm/output/*'
+          }
+        }
+
+        stage('L2: ITN export') {
+          steps {
+            sh 'cd tools/text_processing_deployment && python pynini_export.py --output=/home/TestData/nlp/text_denorm/output/ --grammars=itn_grammars && ls -R /home/TestData/nlp/text_denorm/output/ && echo ".far files created "|| exit 1'
             sh 'cd nemo_text_processing/inverse_text_normalization/ &&  python run_predict.py --input=/home/TestData/nlp/text_denorm/ci/test.txt --output=/home/TestData/nlp/text_denorm/output/test.pynini.txt --verbose'
             sh 'cmp --silent /home/TestData/nlp/text_denorm/output/test.pynini.txt /home/TestData/nlp/text_denorm/ci/test_goal_py.txt || exit 1'
             sh 'rm -rf /home/TestData/nlp/text_denorm/output/*'
@@ -248,6 +255,7 @@ pipeline {
         stage('Speaker Diarization Inference') {
           steps {
             sh 'python examples/speaker_recognition/speaker_diarize.py \
+            diarizer.oracle_num_speakers=2 \
             diarizer.paths2audio_files=/home/TestData/an4_diarizer/audio_files.scp \
             diarizer.path2groundtruth_rttm_files=/home/TestData/an4_diarizer/rttm_files.scp \
             diarizer.speaker_embeddings.model_path=/home/TestData/an4_diarizer/spkr.nemo \
@@ -759,7 +767,7 @@ pipeline {
         model.nemo_path=null \
         ~model.infer_samples \
         +exp_manager.explicit_log_dir=/home/TestData/nlp/mp_autoresume \
-        +exp_manager.resume_if_exists=true' 
+        +exp_manager.resume_if_exists=true'
       }
     }
 
@@ -877,8 +885,11 @@ pipeline {
             model.dataset.use_cache=false \
             trainer.gpus=[0,1] \
             trainer.accelerator=ddp \
-            +trainer.fast_dev_run=true \
-            exp_manager=null'
+            trainer.max_epochs=1 \
+            +exp_manager.explicit_log_dir=/home/TestData/nlp/token_classification_punctuation/output && \
+            python punctuation_capitalization_evaluate.py \
+            pretrained_model=/home/TestData/nlp/token_classification_punctuation/output/checkpoints/Punctuation_and_Capitalization.nemo && \
+            rm -rf /home/TestData/nlp/token_classification_punctuation/output/*'
           }
         }
       }
@@ -992,6 +1003,32 @@ pipeline {
               '
               sh 'rm -rf examples/nlp/language_modeling/PretrainingBERTFromTextwordtok'
             }
+        }
+      }
+    }
+
+    stage('L2: Entity Linking') {
+      when {
+        anyOf {
+          branch 'main'
+          changeRequest target: 'main'
+        }
+      }
+      failFast true
+      parallel {
+        stage ('Self Alignment Pretraining BERT') {
+           steps {
+             sh 'cd examples/nlp/entity_linking && \
+             python self_alignment_pretraining.py \
+             project_dir=. \
+             trainer.val_check_interval=3 \
+             model.raw_data=None \
+             model.train_ds.data_file=/home/TestData/nlp/entity_linking/tiny_example_train_pairs.tsv \
+             model.validation_ds.data_file=/home/TestData/nlp/entity_linking/tiny_example_validation_pairs.tsv \
+             model.train_ds.batch_size=8 \
+             model.validation_ds.batch_size=8 \
+             exp_manager.exp_dir=null'
+          }
         }
       }
     }
