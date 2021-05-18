@@ -35,8 +35,9 @@ def get_features(
     raw_slots=None,
     ignore_extra_tokens=False,
     ignore_start_end=False,
-    extra_cls_token = False
+    extra_cls_token=False
 ):
+
     all_subtokens = []
     all_loss_mask = []
     all_subtokens_mask = []
@@ -198,6 +199,7 @@ class DomainIntentSlotClassificationDataset(Dataset):
         do_lower_case: bool = False,
         extra_cls_token: bool = False
     ):
+
         if num_samples == 0:
             raise ValueError("num_samples has to be positive", num_samples)
 
@@ -294,7 +296,7 @@ class DomainIntentSlotInferenceDataset(Dataset):
             for idx, query in enumerate(queries):
                 queries[idx] = queries[idx].lower()
 
-        features = get_features(queries, max_seq_length, tokenizer, extra_cls_token)
+        features = get_features(queries, max_seq_length, tokenizer, extra_cls_token=extra_cls_token)
 
         self.all_input_ids = features[0]
         self.all_segment_ids = features[1]

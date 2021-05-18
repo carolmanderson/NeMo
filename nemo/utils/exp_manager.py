@@ -643,6 +643,9 @@ class NeMoModelCheckpoint(ModelCheckpoint):
         # Load the best model and then re-save it
         if self.save_best_model:
             trainer.checkpoint_connector.restore(self.best_model_path, on_gpu=trainer.on_gpu)
+        ### ADDED #####
+        # if not os.path.exists(self.dirpath):
+        #     os.makedirs(self.dirpath)
         pl_module.save_to(save_path=os.path.join(self.dirpath, self.prefix + self.postfix))
 
 

@@ -241,8 +241,8 @@ class IntentSlotClassificationModel(NLPModel):
         train_loss = self.total_loss(loss_1=intent_loss, loss_2=slot_loss)
         lr = self._optimizer.param_groups[0]['lr']
 
-        self.log('train_loss', train_loss)
-        self.log('lr', lr, prog_bar=True)
+        self.log('train_loss', train_loss, on_epoch=True)
+        self.log('lr', lr, prog_bar=True, on_epoch=True)
 
         return {
             'loss': train_loss,
@@ -298,13 +298,16 @@ class IntentSlotClassificationModel(NLPModel):
         slot_precision, slot_recall, slot_f1, slot_report = self.slot_classification_report.compute()
         logging.info(f'Slot report: {slot_report}')
 
-        self.log('val_loss', avg_loss)
-        self.log('intent_precision', intent_precision)
-        self.log('intent_recall', intent_recall)
-        self.log('intent_f1', intent_f1)
-        self.log('slot_precision', slot_precision)
-        self.log('slot_recall', slot_recall)
-        self.log('slot_f1', slot_f1)
+        self.log('val_loss', avg_loss, on_epoch=True)
+        self.log('intent_precision', intent_precision, on_epoch=True)
+        self.log('intent_recall', intent_recall, on_epoch=True)
+        self.log('intent_f1', intent_f1, on_epoch=True)
+        self.log('slot_precision', slot_precision, on_epoch=True)
+        self.log('slot_recall', slot_recall, on_epoch=True)
+        self.log('slot_f1', slot_f1, on_epoch=True)
+
+        self.intent_classification_report.reset()
+        self.slot_classification_report.reset()
 
         return {
             'val_loss': avg_loss,
@@ -428,7 +431,6 @@ class IntentSlotClassificationModel(NLPModel):
 
             for batch in infer_datalayer:
                 input_ids, input_type_ids, input_mask, loss_mask, subtokens_mask = batch
-
                 intent_logits, slot_logits = self.forward(
                     input_ids=input_ids.to(device),
                     token_type_ids=input_type_ids.to(device),
@@ -520,14 +522,14 @@ if __name__ == "__main__":
     if DOCKER:
         HOME_DIR = "/workspace"
     else:
-        HOME_DIR = "/Users/carola/Documents"
+        HOME_DIR = "/home/carola/Documents"
 
     models = {}  # save paths to best models
 
     # directory with data converted to nemo format
     data_dir = os.path.join(HOME_DIR, "data/domain_merging")
 
-    datasets = {"merged_no_prepend": "combined_domains/merged","merged_prepend": "combined_domains/merged_prepended"}
+    datasets = {"merged_no_prepend": "combined_domains/merged"}
     # datasets = {"merged_prepend": "combined_domains/merged_prepended"}
     # datasets = {"weather_no_prepend" : "rc3_weather/weather"}
     # datasets = {"poi_no_prepend" : "rc2.2_poi/poi"}
@@ -535,32 +537,37 @@ if __name__ == "__main__":
     #
 
     for i, dataset in enumerate(datasets.keys()):
-        print(dataset)
         inpath = os.path.join(data_dir, datasets[dataset])
 
         # config
+        # config_file = os.path.join(HOME_DIR,
+        #                            "configs/joint_intent_slot/intent_slot_classification_config.yaml")
         config_file = os.path.join(HOME_DIR,
-                                   "configs/joint_intent_slot/intent_slot_classification_config.yaml")
+                                   "configs/joint_intent_slot/intent_slot_classification_ibert.yaml")
         config = OmegaConf.load(config_file)
         config.model.data_dir = inpath
-        config.model.language_model.pretrained_model_name = "kssteven/ibert-roberta-base"
+        # config.model.language_model.pretrained_model_name = "kssteven/ibert-roberta-base"
+        # config.model.language_model.config_file = "/home/carola/Documents/configs/ibert/ibert_quantized.json"
+        config.model.language_model.config_file = "/home/carola/Documents/configs/ibert/ibert.json"
+
         config.model.validation_ds.prefix = "dev"
         config.model.test_ds.prefix = "dev"
         config.model.intent_loss_weight = 0.6
         config.model.class_balancing = "weighted_loss"
         config.model.head.num_output_layers = 1
         config.exp_manager.create_wandb_logger = True
-        run_name = "run {}".format(i+20)
+        run_name = "test_2"
         config.exp_manager.wandb_logger_kwargs = {
             "name": run_name,
-            "project": "tinkering", "entity": "carola", "reinit": True}
-        config.trainer.max_epochs = 2
+            "project": "nvcc", "entity": "carola", "reinit": True}
+        config.trainer.max_epochs = 50
 
         # checks if we have GPU available and uses it
         cuda = 1 if torch.cuda.is_available() else 0
         config.trainer.gpus = cuda
 
-        config.trainer.precision = 16 if torch.cuda.is_available() else 32
+        # config.trainer.precision = 16 if torch.cuda.is_available() else 32
+        config.trainer.precision = 32
 
         # for mixed precision training, uncomment the line below (precision should be set to 16 and amp_level to O1):
         # config.trainer.amp_level = O1
@@ -568,9 +575,17 @@ if __name__ == "__main__":
         # remove distributed training flags
         config.trainer.accelerator = None
 
-        #     early_stop_callback = EarlyStopping(monitor='intent_f1', min_delta=1e-1, patience=10, verbose=True, mode='max')
+        # early_stop_callback = EarlyStopping(monitor='intent_f1', min_delta=1e-1, patience=10, verbose=True, mode='max')
 
         # trainer = pl.Trainer(callbacks=[early_stop_callback], **config.trainer)
+
+        # IBERT
+        # checkpoint = '/home/carola/Documents/output/merged_no_prepend/IntentSlot/2021-05-11_16-12-23/checkpoints/IntentSlot--intent_f1=97.57-epoch=29-last_edited.ckpt'
+        checkpoint = '/home/carola/Documents/output/merged_no_prepend/IntentSlot/2021-05-12_19-36-09/checkpoints/IntentSlot--intent_f1=88.53-epoch=27-last.ckpt'
+       # regular BERT
+       #  checkpoint = "/home/carola/Documents/output/merged_no_prepend/IntentSlot/2021-05-06_11-46-05/checkpoints/IntentSlot-last.ckpt"
+       #  config.trainer.resume_from_checkpoint = checkpoint
+
         trainer = pl.Trainer(**config.trainer)
         config.exp_manager.exp_dir = os.path.join(HOME_DIR, "output/" + dataset)
         config.exp_manager.create_checkpoint_callback = True
@@ -582,10 +597,15 @@ if __name__ == "__main__":
         print("Wandb: ", config.exp_manager.wandb_logger_kwargs)
 
         #     initialize the model
+
+
         model = nemo_nlp.models.IntentSlotClassificationModel(config.model, trainer=trainer)
 
-        # train
+        # # train
+        for logger in trainer.logger:
+            if isinstance(logger, WandbLogger):
+                logger.watch(model, log="all")
         trainer.fit(model)
-        models[dataset] = trainer.checkpoint_callback.best_model_path
-
+        # models[dataset] = trainer.checkpoint_callback.best_model_path
+        #
         wandb.finish()

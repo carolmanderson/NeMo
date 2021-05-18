@@ -63,6 +63,7 @@ class DomainIntentSlotClassificationModel(NLPModel):
         self.setup_tokenizer(cfg.tokenizer)
 
         strategy = cfg.domain_cls_strategy
+
         if strategy == "shared":
             self.extra_cls_token = False
         elif strategy in ["CLS2_random", "CLS2_from_CLS"]:
@@ -100,16 +101,18 @@ class DomainIntentSlotClassificationModel(NLPModel):
             vocab_file=cfg.tokenizer.vocab_file,
         )
 
-        if strategy in ["CLS2_random", "CLS2_from_CLS"]:
-            # resize bert model to account for extra [CLS2] token
-            self.bert_model.resize_token_embeddings(self.tokenizer.vocab_size)
+        # Initialize the [CLS2] token embedding using the pretrained [CLS] embedding or a random embedding.
+        # But only do this when starting to train a new model; not when reloading a saved model.
+        if self.tokenizer.vocab_size > self.bert_model.embeddings.word_embeddings.weight.shape[0]:
+            if strategy in ["CLS2_random", "CLS2_from_CLS"]:
+                # resize bert model to account for extra [CLS2] token
+                self.bert_model.resize_token_embeddings(self.tokenizer.vocab_size)
 
-        if strategy == "CLS2_from_CLS":
-            # initialize the [CLS2] token embedding using the pretrained [CLS] embedding
-            input_embs = self.bert_model.get_input_embeddings()
-            with torch.no_grad():
-                input_embs.weight[-1] = input_embs.weight[self.tokenizer.cls_id]
-            self.bert_model.set_input_embeddings(input_embs)
+            if strategy == "CLS2_from_CLS":
+                input_embs = self.bert_model.get_input_embeddings()
+                with torch.no_grad():
+                    input_embs.weight[-1] = input_embs.weight[self.tokenizer.cls_id]
+                self.bert_model.set_input_embeddings(input_embs)
 
         # Initialize Classifier.
         self._reconfigure_classifier()
@@ -137,6 +140,7 @@ class DomainIntentSlotClassificationModel(NLPModel):
 
             cfg.data_desc.pad_label = "O"
             OmegaConf.set_struct(cfg, True)
+
 
     def _set_data_desc_to_cfg(self, cfg, data_dir, train_ds, validation_ds):
         """ Method creates IntentSlotDataDesc and copies generated values to cfg.data_desc. """
@@ -370,6 +374,10 @@ class DomainIntentSlotClassificationModel(NLPModel):
         self.log('slot_recall', slot_recall)
         self.log('slot_f1', slot_f1)
 
+        self.intent_classification_report.reset()
+        self.slot_classification_report.reset()
+        self.domain_classification_report.reset()
+
         return {
             'val_loss': avg_loss,
             'domain_precision': domain_precision,
@@ -462,7 +470,7 @@ class DomainIntentSlotClassificationModel(NLPModel):
             drop_last=test_ds.drop_last,
         )
 
-    def predict_from_examples(self, queries: List[str], batch_size: int = 32) -> List[List[str]]:
+    def predict_from_examples(self, queries: List[str], test_ds) -> List[List[str]]:
         """
         Get prediction for the queries (intent and slots)
         Args:
@@ -475,6 +483,7 @@ class DomainIntentSlotClassificationModel(NLPModel):
         predicted_intents = []
         predicted_slots = []
         mode = self.training
+
         try:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -494,10 +503,11 @@ class DomainIntentSlotClassificationModel(NLPModel):
             self.to(device)
 
             # Dataset.
-            infer_datalayer = self._setup_infer_dataloader(queries, batch_size)
+            infer_datalayer = self._setup_infer_dataloader(queries, test_ds)
 
             for batch in infer_datalayer:
                 input_ids, input_type_ids, input_mask, loss_mask, subtokens_mask = batch
+
 
                 domain_logits, intent_logits, slot_logits = self.forward(
                     input_ids=input_ids.to(device),
@@ -569,12 +579,29 @@ if __name__ == "__main__":
     from omegaconf import OmegaConf
     import pytorch_lightning as pl
     from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+    from pytorch_lightning.loggers import WandbLogger
     import wandb
 
+    '''
+    ############## SWEEP ##################################################
+    wandb.login()
 
+    sweep_config = {
+        'method': 'grid',
+        'metric': {
+            "name": 'train_loss',
+            'goal': "minimize"
+        },
+        'parameters': {
+            "domain_loss_weight": {
+                "values": [0.05, 0.1, 0.2, 0.3]
+            }
+        }
+    }
 
-    for cls_strategy in ["CLS2_from_CLS", 'CLS2_random']:
+    sweep_id = wandb.sweep(sweep_config, project="nvcc", entity="carola")
 
+    def train():
         HOME_DIR = "/home/carola/Documents"
 
         # directory with data converted to nemo format
@@ -584,23 +611,17 @@ if __name__ == "__main__":
         config_file = os.path.join(HOME_DIR,
                                    "configs/joint_domain_intent_slot/domain_intent_slot_classification_new_hyperparams.yaml")
         config = OmegaConf.load(config_file)
-        config.trainer.max_epochs = 40
+        config.trainer.max_epochs = 2
         config.model.data_dir = data_dir
         config.model.validation_ds.prefix = "dev"
         config.model.test_ds.prefix = "dev"
-        config.model.intent_loss_weight = 0.5
-        config.model.domain_loss_weight = 0.05
+        # config.model.intent_loss_weight = 0.5
+        # config.model.domain_loss_weight = 0.05
         config.model.class_balancing = "weighted_loss"
-        config.model.domain_cls_strategy = cls_strategy  # options: shared, CLS2_random, CLS2_from_CLS
         config.trainer.val_check_interval = 100
-        config.exp_manager.create_wandb_logger=True
-        config.exp_manager.wandb_logger_kwargs = {"name": "domain_intent_slot_20210506_{}".format(cls_strategy), "project": "nvcc", "entity":"carola"}
-        config.exp_manager.version = time.strftime('%Y-%m-%d_%H-%M-%S')
 
-        # checks if we have GPU available and uses it
         cuda = 1 if torch.cuda.is_available() else 0
         config.trainer.gpus = cuda
-
         config.trainer.precision = 16 if torch.cuda.is_available() else 32
 
         # for mixed precision training, uncomment the line below (precision should be set to 16 and amp_level to O1):
@@ -608,17 +629,82 @@ if __name__ == "__main__":
 
         # remove distributed training flags
         config.trainer.accelerator = None
-
-        # early_stop_callback = EarlyStopping(monitor='intent_f1', min_delta=1e-1, patience=10, verbose=True, mode='max')
-
-        # trainer = pl.Trainer(callbacks=[early_stop_callback], **config.trainer)
-        trainer = pl.Trainer(**config.trainer)
-
-
+        
+        early_stop_callback = EarlyStopping(monitor='intent_f1', min_delta=1e-1, patience=10, verbose=True, mode='max')
+        trainer = pl.Trainer(callbacks=[early_stop_callback], **config.trainer)
+        config.exp_manager.create_wandb_logger = True
+        config.exp_manager.wandb_logger_kwargs = {"name": "sweeps test",
+                                                  "project": "nvcc", "entity": "carola"}
+        config.exp_manager.version = time.strftime('%Y-%m-%d_%H-%M-%S')
         config.exp_manager.exp_dir = os.path.join(HOME_DIR, "output/")
-
         exp_dir = exp_manager(trainer, config.get("exp_manager", None))
+        for logger in trainer.logger:
+            if isinstance(logger, WandbLogger):
+                run = logger.experiment
+                break
+        wandb_config = run.config
+        domain_loss_weight = wandb_config.domain_loss_weight
+        config.model.domain_loss_weight = domain_loss_weight
+        config.model.intent_loss_weight = 0.6-domain_loss_weight
+        config.model.domain_cls_strategy = 'CLS2_from_CLS'
+        config.model.language_model.pretrained_model_name = "distilbert-base-uncased"
         model = nemo_nlp.models.DomainIntentSlotClassificationModel(config.model, trainer=trainer)
         trainer.fit(model)
-
         wandb.finish()
+
+
+    wandb.agent(sweep_id, train, count=4)
+
+    '''
+    ###################### END OF SWEEP ########################################################
+
+    HOME_DIR = "/home/carola/Documents"
+
+    # directory with data converted to nemo format
+    data_dir = os.path.join(HOME_DIR, "data/domain_merging/combined_domains/merged_with_domain")
+
+    # config
+    config_file = os.path.join(HOME_DIR,
+                               "configs/joint_domain_intent_slot/domain_intent_slot_classification_new_hyperparams.yaml")
+    config = OmegaConf.load(config_file)
+    config.trainer.max_epochs = 1
+    config.model.data_dir = data_dir
+    config.model.validation_ds.prefix = "dev"
+    config.model.test_ds.prefix = "dev"
+    config.model.intent_loss_weight = 0.5
+    config.model.domain_loss_weight = 0.05
+    config.model.class_balancing = "weighted_loss"
+    # config.trainer.val_check_interval = 100
+
+    cuda = 1 if torch.cuda.is_available() else 0
+    config.trainer.gpus = cuda
+    config.trainer.precision = 16 if torch.cuda.is_available() else 32
+
+    # for mixed precision training, uncomment the line below (precision should be set to 16 and amp_level to O1):
+    # config.trainer.amp_level = O1
+
+    # remove distributed training flags
+    config.trainer.accelerator = None
+
+    # trainer = pl.Trainer(callbacks=[early_stop_callback], **config.trainer)
+    trainer = pl.Trainer(**config.trainer)
+
+    config.exp_manager.create_wandb_logger = True
+    config.exp_manager.wandb_logger_kwargs = {"name": "domain_intent_slot_test_4",
+                                              "project": "nvcc", "entity": "carola"}
+    config.exp_manager.version = time.strftime('%Y-%m-%d_%H-%M-%S')
+    config.exp_manager.exp_dir = os.path.join(HOME_DIR, "output/")
+    exp_dir = exp_manager(trainer, config.get("exp_manager", None))
+
+    # config.model.domain_cls_strategy = wandb_config.domain_cls_strategy  # options: shared, CLS2_random, CLS2_from_CLS
+    config.model.domain_cls_strategy = 'CLS2_from_CLS'
+    config.model.language_model.pretrained_model_name = "distilbert-base-uncased"
+
+    model = nemo_nlp.models.DomainIntentSlotClassificationModel(config.model, trainer=trainer)
+
+    trainer.fit(model)
+
+    wandb.finish()
+
+    # c = "/home/carola/Documents/output/IntentSlot/2021-05-18_11-48-36/checkpoints/IntentSlot--intent_f1=94.00-epoch=1.ckpt"  # new, distilbert, cls2 from cls; 98.25
+    # infer_model = nemo_nlp.models.DomainIntentSlotClassificationModel.load_from_checkpoint(checkpoint_path=c)
